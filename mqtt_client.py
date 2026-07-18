@@ -95,6 +95,24 @@ def decrypt_payload(ciphertext_b64: str) -> dict:
     return json.loads(_sanitize_json_text(text))
 
 
+def _safe_callback(func):
+    """
+    Decorator for paho callbacks. An uncaught exception inside any paho
+    callback silently kills the ENTIRE background network thread - no
+    crash is shown in the app, no automatic reconnect happens, and the
+    dashboard just quietly stops receiving messages forever (looking
+    exactly like a broken connection, when the connection was actually
+    fine). Wrapping every callback like this means a bug in one callback
+    gets logged instead of taking down the whole MQTT pipeline.
+    """
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            print(f"[MQTT] Exception inside {func.__name__} (caught, thread survives): {exc!r}")
+    return wrapper
+
+
 class MQTTDeviceManager:
     """
     Owns the MQTT connection and the shared `devices` state.
@@ -142,6 +160,7 @@ class MQTTDeviceManager:
 
     # -- MQTT callbacks ----------------------------------------------------
 
+    @_safe_callback
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code == 0:
             print("[MQTT] Connected to broker.")
@@ -152,17 +171,24 @@ class MQTTDeviceManager:
             if reason_code in (4, 5) or "not authorised" in str(reason_code).lower():
                 print("[MQTT] This usually means bad/missing username or password.")
 
+    @_safe_callback
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
         print(f"[MQTT] Disconnected (reason code: {reason_code}). "
               f"paho will attempt to reconnect automatically.")
 
+    @_safe_callback
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
         # reason_codes >= 128 mean the broker REFUSED the subscription
         # (e.g. this credential set has no permission on this topic) -
         # a successful subscribe() call does NOT guarantee the broker
         # actually granted it, so this is the real confirmation.
+        # NOTE: paho 2.x wraps each code in a ReasonCode object which
+        # supports direct comparison (>=) but not int() conversion.
         codes = [reason_codes] if not isinstance(reason_codes, list) else reason_codes
-        denied = [c for c in codes if int(c) >= 128]
+        try:
+            denied = [c for c in codes if c >= 128]
+        except TypeError:
+            denied = [c for c in codes if getattr(c, "value", 0) >= 128]
         if denied:
             print(f"[MQTT] Subscription DENIED by broker, reason code(s): {denied}. "
                   f"Check this credential's topic permissions in HiveMQ Cloud.")
