@@ -18,12 +18,28 @@ directly - always go through `mqtt_manager.get_snapshot()`.
 import base64
 import copy
 import json
+import socket
 import threading
 import time
 
 import paho.mqtt.client as mqtt
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+
+
+def _diagnose_connectivity(host="broker.hivemq.com", ports=(1883, 8883)):
+    """Raw TCP connect test, run at import time, printed to the normal
+    Render log stream. Temporary debugging aid - safe to remove later."""
+    for port in ports:
+        try:
+            s = socket.create_connection((host, port), timeout=10)
+            print(f"[MQTT-DIAG] Port {port}: TCP connect OK ({s.getpeername()})")
+            s.close()
+        except Exception as exc:
+            print(f"[MQTT-DIAG] Port {port}: FAILED -> {exc!r}")
+
+
+_diagnose_connectivity()
 
 # --------------------------------------------------------------------------
 # Broker / topic configuration
@@ -144,7 +160,15 @@ class MQTTDeviceManager:
         """Connect and start the network loop in a background thread."""
         if self._started:
             return
-        self._client.connect(self.broker, self.port, KEEPALIVE)
+        self._client.connect_timeout = 10  # fail fast instead of hanging
+        try:
+            self._client.connect(self.broker, self.port, KEEPALIVE)
+        except Exception as exc:
+            print(f"[MQTT] connect() raised: {exc!r}")
+            # Still start the loop - paho's built-in reconnect logic will
+            # keep retrying in the background even after a failed first
+            # attempt, and each attempt's outcome is logged via
+            # _on_connect / _on_disconnect.
         self._client.loop_start()
         self._started = True
         print("[MQTT] Background loop started.")
