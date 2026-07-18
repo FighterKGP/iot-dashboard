@@ -150,7 +150,7 @@ class MQTTDeviceManager:
             if reason_code in (4, 5) or "not authorised" in str(reason_code).lower():
                 print("[MQTT] This usually means bad/missing username or password.")
 
-    def _on_disconnect(self, client, userdata, reason_code, properties=None, *args):
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
         print(f"[MQTT] Disconnected (reason code: {reason_code}). "
               f"paho will attempt to reconnect automatically.")
 
