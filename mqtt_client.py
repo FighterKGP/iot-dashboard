@@ -18,7 +18,7 @@ directly - always go through `mqtt_manager.get_snapshot()`.
 import base64
 import copy
 import json
-import socket
+import os
 import threading
 import time
 
@@ -26,26 +26,16 @@ import paho.mqtt.client as mqtt
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-
-def _diagnose_connectivity(host="broker.hivemq.com", ports=(1883, 8883)):
-    """Raw TCP connect test, run at import time, printed to the normal
-    Render log stream. Temporary debugging aid - safe to remove later."""
-    for port in ports:
-        try:
-            s = socket.create_connection((host, port), timeout=10)
-            print(f"[MQTT-DIAG] Port {port}: TCP connect OK ({s.getpeername()})")
-            s.close()
-        except Exception as exc:
-            print(f"[MQTT-DIAG] Port {port}: FAILED -> {exc!r}")
-
-
-_diagnose_connectivity()
-
 # --------------------------------------------------------------------------
 # Broker / topic configuration
 # --------------------------------------------------------------------------
-BROKER = "broker.hivemq.com"
-PORT = 1883
+# Private HiveMQ Cloud cluster (TLS required on port 8883).
+# Set these three as environment variables - on Render: Environment tab.
+# Locally: set them in your shell, or hardcode temporarily for a quick test.
+BROKER = os.environ.get("MQTT_BROKER", "REPLACE_WITH_YOUR_CLUSTER_URL.hivemq.cloud")
+PORT = int(os.environ.get("MQTT_PORT", 8883))
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 TOPIC = "IITKGP/esp32/#"
 KEEPALIVE = 60
 
@@ -105,6 +95,12 @@ class MQTTDeviceManager:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
 
+        # Private broker requires TLS + credentials (the old public
+        # broker.hivemq.com needed neither, since it had no auth at all).
+        self._client.tls_set()  # uses system CA certs to verify the broker
+        if MQTT_USERNAME:
+            self._client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
         # paho's built-in exponential backoff reconnect
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
@@ -125,7 +121,6 @@ class MQTTDeviceManager:
               f"paho will attempt to reconnect automatically.")
 
     def _on_message(self, client, userdata, msg):
-        print(f"[MQTT-DIAG] Message received on '{msg.topic}' ({len(msg.payload)} bytes)")
         try:
             topic = msg.topic
             payload = msg.payload.decode("utf-8", errors="ignore")
