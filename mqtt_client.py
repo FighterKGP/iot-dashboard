@@ -23,6 +23,7 @@ import re
 import ssl
 import threading
 import time
+import uuid
 
 import paho.mqtt.client as mqtt
 from Crypto.Cipher import AES
@@ -118,7 +119,8 @@ class MQTTDeviceManager:
         self._devices = {}
         self._lock = threading.Lock()
 
-        self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client_id = f"dashboard-{uuid.uuid4().hex[:8]}"
+        self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
@@ -210,6 +212,7 @@ class MQTTDeviceManager:
         """Connect and start the network loop in a background thread."""
         if self._started:
             return
+        print(f"[MQTT] Connecting as client ID: {self._client._client_id.decode()}")
         self._client.connect_timeout = 10  # fail fast instead of hanging
         try:
             self._client.connect(self.broker, self.port, KEEPALIVE)
