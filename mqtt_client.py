@@ -122,6 +122,7 @@ class MQTTDeviceManager:
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
+        self._client.on_subscribe = self._on_subscribe
 
         if MQTT_USERNAME:
             self._client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
@@ -153,6 +154,19 @@ class MQTTDeviceManager:
         print(f"[MQTT] Disconnected (reason code: {reason_code}). "
               f"paho will attempt to reconnect automatically.")
 
+    def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        # reason_codes >= 128 mean the broker REFUSED the subscription
+        # (e.g. this credential set has no permission on this topic) -
+        # a successful subscribe() call does NOT guarantee the broker
+        # actually granted it, so this is the real confirmation.
+        codes = [reason_codes] if not isinstance(reason_codes, list) else reason_codes
+        denied = [c for c in codes if int(c) >= 128]
+        if denied:
+            print(f"[MQTT] Subscription DENIED by broker, reason code(s): {denied}. "
+                  f"Check this credential's topic permissions in HiveMQ Cloud.")
+        else:
+            print(f"[MQTT] Subscription granted by broker, QoS/code(s): {codes}")
+
     def _on_message(self, client, userdata, msg):
         raw_text = None
         try:
@@ -181,6 +195,9 @@ class MQTTDeviceManager:
 
             with self._lock:
                 self._devices[device_name] = data
+
+            print(f"[MQTT] Received + stored update for device '{device_name}' "
+                  f"(topic '{topic}')")
 
         except Exception as exc:
             print(f"[MQTT] Error handling message on '{msg.topic}': {exc}")
