@@ -125,6 +125,7 @@ class MQTTDeviceManager:
               f"paho will attempt to reconnect automatically.")
 
     def _on_message(self, client, userdata, msg):
+        print(f"[MQTT-DIAG] Message received on '{msg.topic}' ({len(msg.payload)} bytes)")
         try:
             topic = msg.topic
             payload = msg.payload.decode("utf-8", errors="ignore")
