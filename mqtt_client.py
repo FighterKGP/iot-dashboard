@@ -19,6 +19,8 @@ import base64
 import copy
 import json
 import os
+import re
+import ssl
 import threading
 import time
 
@@ -29,13 +31,19 @@ from Crypto.Util.Padding import unpad
 # --------------------------------------------------------------------------
 # Broker / topic configuration
 # --------------------------------------------------------------------------
-# Private HiveMQ Cloud cluster (TLS required on port 8883).
-# Set these three as environment variables - on Render: Environment tab.
-# Locally: set them in your shell, or hardcode temporarily for a quick test.
-BROKER = os.environ.get("MQTT_BROKER", "REPLACE_WITH_YOUR_CLUSTER_URL.hivemq.cloud")
-PORT = int(os.environ.get("MQTT_PORT", 8883))
-MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
+# Read from environment variables so credentials never get committed to a
+# public GitHub repo. Set these in Render's dashboard under
+# Environment (not in the code, not in git).
+#
+# HiveMQ Cloud requires TLS + username/password on every connection -
+# there is no plaintext/unauthenticated option, unlike the public test
+# broker.hivemq.com:1883 this project originally used.
+BROKER = os.environ.get("MQTT_BROKER", "broker.hivemq.com")
+PORT = int(os.environ.get("MQTT_PORT", 1883))
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME")  # required for HiveMQ Cloud
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")  # required for HiveMQ Cloud
+MQTT_USE_TLS = os.environ.get("MQTT_USE_TLS", "false").lower() == "true"
+
 TOPIC = "IITKGP/esp32/#"
 KEEPALIVE = 60
 
@@ -58,12 +66,32 @@ REMOVE_AFTER_SECONDS = STALE_AFTER_SECONDS + OFFLINE_GRACE_SECONDS
 RF_CHANNEL_COUNT = 126
 
 
-def decrypt_payload(ciphertext_b64: str) -> dict:
-    """Base64-decode -> AES-CBC decrypt -> unpad -> JSON-parse a payload."""
+def decrypt_to_text(ciphertext_b64: str) -> str:
+    """Base64-decode -> AES-CBC decrypt -> unpad -> return the raw UTF-8 text."""
     ciphertext = base64.b64decode(ciphertext_b64)
     cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
     plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size)
-    return json.loads(plaintext.decode("utf-8"))
+    return plaintext.decode("utf-8")
+
+
+# Arduino's String(float) conversion prints a failed DHT11 read as the bare
+# word 'nan' (or '-nan'/'inf') with no quotes - which is not valid JSON and
+# would otherwise make json.loads() reject the ENTIRE packet (RF data and
+# all) just because one field failed to read. Replace those tokens with
+# `null` before parsing so the rest of the packet still comes through; a
+# null Temp/Humidity is then treated as "component disconnected", exactly
+# like the Tstatus/Rstatus flags already do.
+_INVALID_NUMERIC_TOKEN_RE = re.compile(r":\s*-?(?:nan|inf(?:inity)?)\b", re.IGNORECASE)
+
+
+def _sanitize_json_text(text: str) -> str:
+    return _INVALID_NUMERIC_TOKEN_RE.sub(": null", text)
+
+
+def decrypt_payload(ciphertext_b64: str) -> dict:
+    """Base64-decode -> AES-CBC decrypt -> unpad -> JSON-parse a payload."""
+    text = decrypt_to_text(ciphertext_b64)
+    return json.loads(_sanitize_json_text(text))
 
 
 class MQTTDeviceManager:
@@ -95,11 +123,14 @@ class MQTTDeviceManager:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
 
-        # Private broker requires TLS + credentials (the old public
-        # broker.hivemq.com needed neither, since it had no auth at all).
-        self._client.tls_set()  # uses system CA certs to verify the broker
         if MQTT_USERNAME:
             self._client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+        if MQTT_USE_TLS:
+            # HiveMQ Cloud (and most managed brokers) require TLS on their
+            # secure port (typically 8883). This uses the system's default
+            # trusted CA certificates to verify the broker's certificate.
+            self._client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
 
         # paho's built-in exponential backoff reconnect
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
@@ -115,17 +146,21 @@ class MQTTDeviceManager:
             print(f"[MQTT] Subscribed to: {self.topic}")
         else:
             print(f"[MQTT] Connection failed, reason code: {reason_code}")
+            if reason_code in (4, 5) or "not authorised" in str(reason_code).lower():
+                print("[MQTT] This usually means bad/missing username or password.")
 
     def _on_disconnect(self, client, userdata, reason_code, properties=None, *args):
         print(f"[MQTT] Disconnected (reason code: {reason_code}). "
               f"paho will attempt to reconnect automatically.")
 
     def _on_message(self, client, userdata, msg):
+        raw_text = None
         try:
             topic = msg.topic
             payload = msg.payload.decode("utf-8", errors="ignore")
 
-            data = decrypt_payload(payload)
+            raw_text = decrypt_to_text(payload)
+            data = json.loads(_sanitize_json_text(raw_text))
 
             # IMPORTANT: never reject the whole packet just because one
             # sensor's field is missing/null (e.g. the DHT11 got
@@ -149,6 +184,8 @@ class MQTTDeviceManager:
 
         except Exception as exc:
             print(f"[MQTT] Error handling message on '{msg.topic}': {exc}")
+            if raw_text is not None:
+                print(f"[MQTT] Raw decrypted text was: {raw_text!r}")
 
     # -- Public API ----------------------------------------------------------
 
